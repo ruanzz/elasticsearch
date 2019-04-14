@@ -3,6 +3,7 @@
  * or more contributor license agreements. Licensed under the Elastic License;
  * you may not use this file except in compliance with the Elastic License.
  */
+
 package org.elasticsearch.xpack.security.authc;
 
 import org.apache.logging.log4j.LogManager;
@@ -30,6 +31,7 @@ import org.elasticsearch.action.search.SearchResponse;
 import org.elasticsearch.action.support.WriteRequest.RefreshPolicy;
 import org.elasticsearch.action.support.master.AcknowledgedRequest;
 import org.elasticsearch.action.update.UpdateRequest;
+import org.elasticsearch.action.update.UpdateRequestBuilder;
 import org.elasticsearch.action.update.UpdateResponse;
 import org.elasticsearch.client.Client;
 import org.elasticsearch.cluster.AckedClusterStateUpdateTask;
@@ -72,6 +74,7 @@ import org.elasticsearch.xpack.core.XPackPlugin;
 import org.elasticsearch.xpack.core.XPackSettings;
 import org.elasticsearch.xpack.core.security.ScrollHelper;
 import org.elasticsearch.xpack.core.security.authc.Authentication;
+import org.elasticsearch.xpack.core.security.authc.Authentication.AuthenticationType;
 import org.elasticsearch.xpack.core.security.authc.KeyAndTimestamp;
 import org.elasticsearch.xpack.core.security.authc.TokenMetaData;
 import org.elasticsearch.xpack.core.security.authc.support.TokensInvalidationResult;
@@ -123,9 +126,11 @@ import java.util.stream.Collectors;
 
 import static org.elasticsearch.action.support.TransportActions.isShardNotAvailableException;
 import static org.elasticsearch.gateway.GatewayService.STATE_NOT_RECOVERED_BLOCK;
+import static org.elasticsearch.index.mapper.MapperService.SINGLE_MAPPING_NAME;
 import static org.elasticsearch.search.SearchService.DEFAULT_KEEPALIVE_SETTING;
 import static org.elasticsearch.xpack.core.ClientHelper.SECURITY_ORIGIN;
 import static org.elasticsearch.xpack.core.ClientHelper.executeAsyncWithOrigin;
+import static org.elasticsearch.xpack.security.support.SecurityIndexManager.SECURITY_INDEX_NAME;
 
 /**
  * Service responsible for the creation, validation, and other management of {@link UserToken}
@@ -151,11 +156,10 @@ public final class TokenService {
             "\", error=\"invalid_token\", error_description=\"The access token expired\"";
     private static final String MALFORMED_TOKEN_WWW_AUTH_VALUE = "Bearer realm=\"" + XPackField.SECURITY +
             "\", error=\"invalid_token\", error_description=\"The access token is malformed\"";
-    private static final String TYPE = "doc";
 
     public static final String THREAD_POOL_NAME = XPackField.SECURITY + "-token-key";
     public static final Setting<TimeValue> TOKEN_EXPIRATION = Setting.timeSetting("xpack.security.authc.token.timeout",
-            TimeValue.timeValueMinutes(20L), TimeValue.timeValueSeconds(1L), Property.NodeScope);
+            TimeValue.timeValueMinutes(20L), TimeValue.timeValueSeconds(1L), TimeValue.timeValueHours(1L), Property.NodeScope);
     public static final Setting<TimeValue> DELETE_INTERVAL = Setting.timeSetting("xpack.security.authc.token.delete.interval",
             TimeValue.timeValueMinutes(30L), Property.NodeScope);
     public static final Setting<TimeValue> DELETE_TIMEOUT = Setting.timeSetting("xpack.security.authc.token.delete.timeout",
@@ -234,10 +238,9 @@ public final class TokenService {
             final Instant created = clock.instant();
             final Instant expiration = getExpirationTime(created);
             final Version version = clusterService.state().nodes().getMinNodeVersion();
-            final Authentication matchingVersionAuth = version.equals(authentication.getVersion()) ? authentication :
-                    new Authentication(authentication.getUser(), authentication.getAuthenticatedBy(), authentication.getLookedUpBy(),
-                            version);
-            final UserToken userToken = new UserToken(version, matchingVersionAuth, expiration, metadata);
+            final Authentication tokenAuth = new Authentication(authentication.getUser(), authentication.getAuthenticatedBy(),
+                authentication.getLookedUpBy(), version, AuthenticationType.TOKEN, authentication.getMetadata());
+            final UserToken userToken = new UserToken(version, tokenAuth, expiration, metadata);
             final String refreshToken = includeRefreshToken ? UUIDs.randomBase64UUID() : null;
 
             try (XContentBuilder builder = XContentFactory.jsonBuilder()) {
@@ -264,7 +267,7 @@ public final class TokenService {
                 builder.endObject();
                 final String documentId = getTokenDocumentId(userToken);
                 IndexRequest request =
-                        client.prepareIndex(SecurityIndexManager.SECURITY_INDEX_NAME, TYPE, documentId)
+                        client.prepareIndex(SECURITY_INDEX_NAME, SINGLE_MAPPING_NAME, documentId)
                                 .setOpType(OpType.CREATE)
                                 .setSource(builder)
                                 .setRefreshPolicy(RefreshPolicy.WAIT_UNTIL)
@@ -326,7 +329,7 @@ public final class TokenService {
         ));
     }
 
-    /*
+    /**
      * Asynchronously decodes the string representation of a {@link UserToken}. The process for
      * this is asynchronous as we may need to compute a key, which can be computationally expensive
      * so this should not block the current thread, which is typically a network thread. A second
@@ -360,7 +363,7 @@ public final class TokenService {
                                 securityIndex.checkIndexVersionThenExecute(
                                     ex -> listener.onFailure(traceLog("prepare security index", tokenId, ex)),
                                     () -> {
-                                        final GetRequest getRequest = client.prepareGet(SecurityIndexManager.SECURITY_INDEX_NAME, TYPE,
+                                        final GetRequest getRequest = client.prepareGet(SECURITY_INDEX_NAME, SINGLE_MAPPING_NAME,
                                             getTokenDocumentId(tokenId)).request();
                                         Consumer<Exception> onFailure = ex -> listener.onFailure(traceLog("decode token", tokenId, ex));
                                         executeAsyncWithOrigin(client.threadPool().getThreadContext(), SECURITY_ORIGIN, getRequest,
@@ -584,10 +587,11 @@ public final class TokenService {
         } else {
             BulkRequestBuilder bulkRequestBuilder = client.prepareBulk();
             for (String tokenId : tokenIds) {
-                UpdateRequest request = client.prepareUpdate(SecurityIndexManager.SECURITY_INDEX_NAME, TYPE, getTokenDocumentId(tokenId))
-                    .setDoc(srcPrefix, Collections.singletonMap("invalidated", true))
-                    .setFetchSource(srcPrefix, null)
-                    .request();
+                UpdateRequest request = client
+                        .prepareUpdate(SECURITY_INDEX_NAME, SINGLE_MAPPING_NAME, getTokenDocumentId(tokenId))
+                        .setDoc(srcPrefix, Collections.singletonMap("invalidated", true))
+                        .setFetchSource(srcPrefix, null)
+                        .request();
                 bulkRequestBuilder.add(request);
             }
             bulkRequestBuilder.setRefreshPolicy(RefreshPolicy.WAIT_UNTIL);
@@ -724,7 +728,7 @@ public final class TokenService {
             listener.onFailure(invalidGrantException("could not refresh the requested token"));
         } else {
             Consumer<Exception> onFailure = ex -> listener.onFailure(traceLog("refresh token", tokenDocId, ex));
-            GetRequest getRequest = client.prepareGet(SecurityIndexManager.SECURITY_INDEX_NAME, TYPE, tokenDocId).request();
+            GetRequest getRequest = client.prepareGet(SECURITY_INDEX_NAME, SINGLE_MAPPING_NAME, tokenDocId).request();
             executeAsyncWithOrigin(client.threadPool().getThreadContext(), SECURITY_ORIGIN, getRequest,
                 ActionListener.<GetResponse>wrap(response -> {
                     if (response.isExists()) {
@@ -744,13 +748,13 @@ public final class TokenService {
                             try (StreamInput in = StreamInput.wrap(Base64.getDecoder().decode(authString))) {
                                 in.setVersion(authVersion);
                                 Authentication authentication = new Authentication(in);
-                                UpdateRequest updateRequest =
-                                    client.prepareUpdate(SecurityIndexManager.SECURITY_INDEX_NAME, TYPE, tokenDocId)
-                                        .setVersion(response.getVersion())
+                                UpdateRequestBuilder updateRequest =
+                                    client.prepareUpdate(SECURITY_INDEX_NAME, SINGLE_MAPPING_NAME, tokenDocId)
                                         .setDoc("refresh_token", Collections.singletonMap("refreshed", true))
-                                        .setRefreshPolicy(RefreshPolicy.WAIT_UNTIL)
-                                        .request();
-                                executeAsyncWithOrigin(client.threadPool().getThreadContext(), SECURITY_ORIGIN, updateRequest,
+                                        .setRefreshPolicy(RefreshPolicy.WAIT_UNTIL);
+                                updateRequest.setIfSeqNo(response.getSeqNo());
+                                updateRequest.setIfPrimaryTerm(response.getPrimaryTerm());
+                                executeAsyncWithOrigin(client.threadPool().getThreadContext(), SECURITY_ORIGIN, updateRequest.request(),
                                     ActionListener.<UpdateResponse>wrap(
                                         updateResponse -> createUserToken(authentication, userAuth, listener, metadata, true),
                                         e -> {
@@ -870,7 +874,7 @@ public final class TokenService {
                     )
                 );
 
-            final SearchRequest request = client.prepareSearch(SecurityIndexManager.SECURITY_INDEX_NAME)
+            final SearchRequest request = client.prepareSearch(SECURITY_INDEX_NAME)
                 .setScroll(DEFAULT_KEEPALIVE_SETTING.get(settings))
                 .setQuery(boolQuery)
                 .setVersion(false)
@@ -914,7 +918,7 @@ public final class TokenService {
                     )
                 );
 
-            final SearchRequest request = client.prepareSearch(SecurityIndexManager.SECURITY_INDEX_NAME)
+            final SearchRequest request = client.prepareSearch(SECURITY_INDEX_NAME)
                 .setScroll(DEFAULT_KEEPALIVE_SETTING.get(settings))
                 .setQuery(boolQuery)
                 .setVersion(false)
@@ -1023,8 +1027,8 @@ public final class TokenService {
             listener.onResponse(null);
         } else {
             securityIndex.checkIndexVersionThenExecute(listener::onFailure, () -> {
-                final GetRequest getRequest = client.prepareGet(SecurityIndexManager.SECURITY_INDEX_NAME, TYPE,
-                    getTokenDocumentId(userToken)).request();
+                final GetRequest getRequest = client.prepareGet(SECURITY_INDEX_NAME, SINGLE_MAPPING_NAME, getTokenDocumentId(userToken))
+                        .request();
                 Consumer<Exception> onFailure = ex -> listener.onFailure(traceLog("check token state", userToken.getId(), ex));
                 executeAsyncWithOrigin(client.threadPool().getThreadContext(), SECURITY_ORIGIN, getRequest,
                     ActionListener.<GetResponse>wrap(response -> {

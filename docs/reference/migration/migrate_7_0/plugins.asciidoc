@@ -2,6 +2,13 @@
 [[breaking_70_plugins_changes]]
 === Plugins changes
 
+//NOTE: The notable-breaking-changes tagged regions are re-used in the
+//Installation and Upgrade Guide
+
+//tag::notable-breaking-changes[]
+
+// end::notable-breaking-changes[]
+
 [float]
 ==== Azure Repository plugin
 
@@ -41,7 +48,7 @@ renamed to `requiresAnalysisSettings`
 * This plugin has been removed since its functionality is now part of
 Elasticsearch and requires no plugin. The location of the hosts file has moved
 from `$ES_PATH_CONF/file-discovery/unicast_hosts.txt` to
-`$ES_PATH_CONF/unicast_hosts.txt`. See <<file-based-hosts-provider, the
+`$ES_PATH_CONF/unicast_hosts.txt`. See <<file-based-hosts-provider,the
 file-based hosts provider documentation>> for further information.
 
 [float]
@@ -64,9 +71,22 @@ Setting.AffixSetting<String> MY_SETTING = Setting.affixKeySetting(
 
 The `RealmSettings.simpleString` method can be used as a convenience for the above.
 
+//tag::notable-breaking-changes[]
 [float]
 ==== Tribe node removed
 
 Tribe node functionality has been removed in favor of
-<<modules-cross-cluster-search,Cross Cluster Search>>.
+{ref}/modules-cross-cluster-search.html[{ccs}].
+//end::notable-breaking-changes[]
 
+[float]
+==== Discovery implementations are no longer pluggable
+
+* The method `DiscoveryPlugin#getDiscoveryTypes()` was removed, so that plugins
+  can no longer provide their own discovery implementations.
+
+[float]
+==== Watcher 'hipchat' action removed
+
+Hipchat has been deprecated and shut down as a service. The `hipchat` action for
+watches has been removed.

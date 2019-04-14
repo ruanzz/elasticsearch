@@ -31,6 +31,7 @@ dependencies {
     compileOnly project(path: ':plugins:transport-nio', configuration: 'runtime')
 
     testCompile project(path: xpackModule('core'), configuration: 'testArtifacts')
+    testCompile "org.elasticsearch.plugin:x-pack-ilm:${version}"
 
     // watcher deps
     compile 'com.googlecode.owasp-java-html-sanitizer:owasp-java-html-sanitizer:r239'
@@ -116,7 +117,7 @@ run {
     plugin xpackModule('core')
 }
 
-unitTest {
+test {
     /*
      * We have to disable setting the number of available processors as tests in the same JVM randomize processors and will step on each
      * other if we allow them to set the number of available processors as it's set-once in Netty.

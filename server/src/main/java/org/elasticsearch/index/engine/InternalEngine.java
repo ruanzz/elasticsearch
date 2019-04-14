@@ -474,6 +474,11 @@ public class InternalEngine extends Engine {
         return translog;
     }
 
+    // Package private for testing purposes only
+    boolean hasSnapshottedCommits() {
+        return combinedDeletionPolicy.hasSnapshottedCommits();
+    }
+
     @Override
     public boolean isTranslogSyncNeeded() {
         return getTranslog().syncNeeded();
@@ -495,16 +500,11 @@ public class InternalEngine extends Engine {
     }
 
     /**
-     * Creates a new history snapshot for reading operations since the provided seqno.
-     * The returned snapshot can be retrieved from either Lucene index or translog files.
+     * Creates a new history snapshot for reading operations since the provided seqno from the translog.
      */
     @Override
     public Translog.Snapshot readHistoryOperations(String source, MapperService mapperService, long startingSeqNo) throws IOException {
-        if (engineConfig.getIndexSettings().isSoftDeleteEnabled()) {
-            return newChangesSnapshot(source, mapperService, Math.max(0, startingSeqNo), Long.MAX_VALUE, false);
-        } else {
-            return getTranslog().newSnapshotFromMinSeqNo(startingSeqNo);
-        }
+        return getTranslog().newSnapshotFromMinSeqNo(startingSeqNo);
     }
 
     /**
@@ -619,8 +619,14 @@ public class InternalEngine extends Engine {
                         return GetResult.NOT_EXISTS;
                     }
                     if (get.versionType().isVersionConflictForReads(versionValue.version, get.version())) {
-                        throw new VersionConflictEngineException(shardId, get.type(), get.id(),
+                        throw new VersionConflictEngineException(shardId, get.id(),
                             get.versionType().explainConflictForReads(versionValue.version, get.version()));
+                    }
+                    if (get.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && (
+                        get.getIfSeqNo() != versionValue.seqNo || get.getIfPrimaryTerm() != versionValue.term
+                        )) {
+                        throw new VersionConflictEngineException(shardId, get.id(),
+                            get.getIfSeqNo(), get.getIfPrimaryTerm(), versionValue.seqNo, versionValue.term);
                     }
                     if (get.isReadFromTranslog()) {
                         // this is only used for updates - API _GET calls will always read form a reader for consistency
@@ -940,6 +946,7 @@ public class InternalEngine extends Engine {
                 }
             }
         }
+        markSeqNoAsSeen(index.seqNo());
         return plan;
     }
 
@@ -979,13 +986,13 @@ public class InternalEngine extends Engine {
                 currentNotFoundOrDeleted = versionValue.isDelete();
             }
             if (index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && versionValue == null) {
-                final VersionConflictEngineException e = new VersionConflictEngineException(shardId, index.type(), index.id(),
+                final VersionConflictEngineException e = new VersionConflictEngineException(shardId, index.id(),
                     index.getIfSeqNo(), index.getIfPrimaryTerm(), SequenceNumbers.UNASSIGNED_SEQ_NO, 0);
                 plan = IndexingStrategy.skipDueToVersionConflict(e, currentNotFoundOrDeleted, currentVersion, getPrimaryTerm());
             } else if (index.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && (
                 versionValue.seqNo != index.getIfSeqNo() || versionValue.term != index.getIfPrimaryTerm()
             )) {
-                final VersionConflictEngineException e = new VersionConflictEngineException(shardId, index.type(), index.id(),
+                final VersionConflictEngineException e = new VersionConflictEngineException(shardId, index.id(),
                     index.getIfSeqNo(), index.getIfPrimaryTerm(), versionValue.seqNo, versionValue.term);
                 plan = IndexingStrategy.skipDueToVersionConflict(e, currentNotFoundOrDeleted, currentVersion, getPrimaryTerm());
             } else if (index.versionType().isVersionConflictForWrites(
@@ -1293,6 +1300,7 @@ public class InternalEngine extends Engine {
                     delete.seqNo(), delete.version());
             }
         }
+        markSeqNoAsSeen(delete.seqNo());
         return plan;
     }
 
@@ -1318,13 +1326,13 @@ public class InternalEngine extends Engine {
         }
         final DeletionStrategy plan;
         if (delete.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && versionValue == null) {
-            final VersionConflictEngineException e = new VersionConflictEngineException(shardId, delete.type(), delete.id(),
+            final VersionConflictEngineException e = new VersionConflictEngineException(shardId, delete.id(),
                 delete.getIfSeqNo(), delete.getIfPrimaryTerm(), SequenceNumbers.UNASSIGNED_SEQ_NO, 0);
             plan = DeletionStrategy.skipDueToVersionConflict(e, currentVersion, getPrimaryTerm(), currentlyDeleted);
         } else if (delete.getIfSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO && (
             versionValue.seqNo != delete.getIfSeqNo() || versionValue.term != delete.getIfPrimaryTerm()
         )) {
-            final VersionConflictEngineException e = new VersionConflictEngineException(shardId, delete.type(), delete.id(),
+            final VersionConflictEngineException e = new VersionConflictEngineException(shardId, delete.id(),
                 delete.getIfSeqNo(), delete.getIfPrimaryTerm(), versionValue.seqNo, versionValue.term);
             plan = DeletionStrategy.skipDueToVersionConflict(e, currentVersion, getPrimaryTerm(), currentlyDeleted);
         } else if (delete.versionType().isVersionConflictForWrites(currentVersion, delete.version(), currentlyDeleted)) {
@@ -1444,12 +1452,19 @@ public class InternalEngine extends Engine {
     }
 
     @Override
-    public NoOpResult noOp(final NoOp noOp) {
-        NoOpResult noOpResult;
+    public NoOpResult noOp(final NoOp noOp) throws IOException {
+        final NoOpResult noOpResult;
         try (ReleasableLock ignored = readLock.acquire()) {
+            ensureOpen();
+            markSeqNoAsSeen(noOp.seqNo());
             noOpResult = innerNoOp(noOp);
         } catch (final Exception e) {
-            noOpResult = new NoOpResult(getPrimaryTerm(), noOp.seqNo(), e);
+            try {
+                maybeFailEngine("noop", e);
+            } catch (Exception inner) {
+                e.addSuppressed(inner);
+            }
+            throw e;
         }
         return noOpResult;
     }
@@ -2415,9 +2430,11 @@ public class InternalEngine extends Engine {
         return localCheckpointTracker.getCheckpoint();
     }
 
-    @Override
-    public void waitForOpsToComplete(long seqNo) throws InterruptedException {
-        localCheckpointTracker.waitForOpsToComplete(seqNo);
+    /**
+     * Marks the given seq_no as seen and advances the max_seq_no of this engine to at least that value.
+     */
+    protected final void markSeqNoAsSeen(long seqNo) {
+        localCheckpointTracker.advanceMaxSeqNo(seqNo);
     }
 
     /**
@@ -2527,36 +2544,40 @@ public class InternalEngine extends Engine {
 
     @Override
     public boolean hasCompleteOperationHistory(String source, MapperService mapperService, long startingSeqNo) throws IOException {
-        if (engineConfig.getIndexSettings().isSoftDeleteEnabled()) {
-            return getMinRetainedSeqNo() <= startingSeqNo;
-        } else {
-            final long currentLocalCheckpoint = getLocalCheckpointTracker().getCheckpoint();
-            final LocalCheckpointTracker tracker = new LocalCheckpointTracker(startingSeqNo, startingSeqNo - 1);
-            try (Translog.Snapshot snapshot = getTranslog().newSnapshotFromMinSeqNo(startingSeqNo)) {
-                Translog.Operation operation;
-                while ((operation = snapshot.next()) != null) {
-                    if (operation.seqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
-                        tracker.markSeqNoAsCompleted(operation.seqNo());
-                    }
+        final long currentLocalCheckpoint = getLocalCheckpointTracker().getCheckpoint();
+        final LocalCheckpointTracker tracker = new LocalCheckpointTracker(startingSeqNo, startingSeqNo - 1);
+        try (Translog.Snapshot snapshot = getTranslog().newSnapshotFromMinSeqNo(startingSeqNo)) {
+            Translog.Operation operation;
+            while ((operation = snapshot.next()) != null) {
+                if (operation.seqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
+                    tracker.markSeqNoAsCompleted(operation.seqNo());
                 }
             }
-            return tracker.getCheckpoint() >= currentLocalCheckpoint;
         }
+        return tracker.getCheckpoint() >= currentLocalCheckpoint;
     }
 
     /**
      * Returns the minimum seqno that is retained in the Lucene index.
      * Operations whose seq# are at least this value should exist in the Lucene index.
      */
-    final long getMinRetainedSeqNo() {
+    public final long getMinRetainedSeqNo() {
         assert softDeleteEnabled : Thread.currentThread().getName();
         return softDeletesPolicy.getMinRetainedSeqNo();
     }
 
     @Override
-    public Closeable acquireRetentionLockForPeerRecovery() {
+    public Closeable acquireRetentionLock() {
         if (softDeleteEnabled) {
-            return softDeletesPolicy.acquireRetentionLock();
+            final Releasable softDeletesRetentionLock = softDeletesPolicy.acquireRetentionLock();
+            final Closeable translogRetentionLock;
+            try {
+                translogRetentionLock = translog.acquireRetentionLock();
+            } catch (Exception e) {
+                softDeletesRetentionLock.close();
+                throw e;
+            }
+            return () -> IOUtils.close(translogRetentionLock, softDeletesRetentionLock);
         } else {
             return translog.acquireRetentionLock();
         }
@@ -2709,9 +2730,7 @@ public class InternalEngine extends Engine {
     }
 
     @Override
-    public void initializeMaxSeqNoOfUpdatesOrDeletes() {
-        assert getMaxSeqNoOfUpdatesOrDeletes() == SequenceNumbers.UNASSIGNED_SEQ_NO :
-            "max_seq_no_of_updates is already initialized [" + getMaxSeqNoOfUpdatesOrDeletes() + "]";
+    public void reinitializeMaxSeqNoOfUpdatesOrDeletes() {
         final long maxSeqNo = SequenceNumbers.max(localCheckpointTracker.getMaxSeqNo(), translog.getMaxSeqNo());
         advanceMaxSeqNoOfUpdatesOrDeletes(maxSeqNo);
     }

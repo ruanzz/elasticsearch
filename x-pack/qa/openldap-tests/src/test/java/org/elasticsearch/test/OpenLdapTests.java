@@ -52,22 +52,21 @@ import static org.hamcrest.Matchers.startsWith;
 
 public class OpenLdapTests extends ESTestCase {
 
-    public static final String OPEN_LDAP_DNS_URL = "ldaps://localhost:60636";
-    public static final String OPEN_LDAP_IP_URL = "ldaps://127.0.0.1:60636";
+    public static final String OPEN_LDAP_DNS_URL = "ldaps://localhost:" + getFromProperty("636");
+    public static final String OPEN_LDAP_IP_URL = "ldaps://127.0.0.1:" + getFromProperty("636");
 
     public static final String PASSWORD = "NickFuryHeartsES";
     private static final String HAWKEYE_DN = "uid=hawkeye,ou=people,dc=oldap,dc=test,dc=elasticsearch,dc=com";
-    public static final String LDAPTRUST_PATH = "/idptrust.jks";
+    public static final String LDAPTRUST_PATH = "/ca.jks";
     private static final SecureString PASSWORD_SECURE_STRING = new SecureString(PASSWORD.toCharArray());
     public static final String REALM_NAME = "oldap-test";
 
-    private boolean useGlobalSSL;
     private SSLService sslService;
     private ThreadPool threadPool;
     private Settings globalSettings;
 
     @Before
-    public void init() throws Exception {
+    public void init() {
         threadPool = new TestThreadPool("OpenLdapTests thread pool");
     }
 
@@ -89,32 +88,19 @@ public class OpenLdapTests extends ESTestCase {
          * If we re-use a SSLContext, previously connected sessions can get re-established which breaks hostname
          * verification tests since a re-established connection does not perform hostname verification.
          */
-        useGlobalSSL = randomBoolean();
         MockSecureSettings mockSecureSettings = new MockSecureSettings();
         Settings.Builder builder = Settings.builder().put("path.home", createTempDir());
-        if (useGlobalSSL) {
-            builder.put("xpack.ssl.truststore.path", truststore);
-            mockSecureSettings.setString("xpack.ssl.truststore.secure_password", "changeit");
+        // fake realms so ssl will get loaded
+        builder.put("xpack.security.authc.realms.ldap.foo.ssl.truststore.path", truststore);
+        mockSecureSettings.setString("xpack.security.authc.realms.ldap.foo.ssl.truststore.secure_password", "changeit");
+        builder.put("xpack.security.authc.realms.ldap.foo.ssl.verification_mode", VerificationMode.FULL);
+        builder.put("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.truststore.path", truststore);
+        mockSecureSettings.setString("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.truststore.secure_password", "changeit");
+        builder.put("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.verification_mode", VerificationMode.CERTIFICATE);
 
-            // configure realm to load config with certificate verification mode
-            builder.put("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.truststore.path", truststore);
-            mockSecureSettings.setString("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.truststore.secure_password", "changeit");
-            builder.put("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.verification_mode", VerificationMode.CERTIFICATE);
-        } else {
-            // fake realms so ssl will get loaded
-            builder.put("xpack.security.authc.realms.ldap.foo.ssl.truststore.path", truststore);
-            mockSecureSettings.setString("xpack.security.authc.realms.ldap.foo.ssl.truststore.secure_password", "changeit");
-            builder.put("xpack.security.authc.realms.ldap.foo.ssl.verification_mode", VerificationMode.FULL);
-            builder.put("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.truststore.path", truststore);
-            mockSecureSettings.setString("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.truststore.secure_password", "changeit");
-            builder.put("xpack.security.authc.realms.ldap." + REALM_NAME + ".ssl.verification_mode", VerificationMode.CERTIFICATE);
-
-            // If not using global ssl, need to set the truststore for the "full verification" realm
-            builder.put("xpack.security.authc.realms.ldap.vmode_full.ssl.truststore.path", truststore);
-            mockSecureSettings.setString("xpack.security.authc.realms.ldap.vmode_full.ssl.truststore.secure_password", "changeit");
-        }
+        builder.put("xpack.security.authc.realms.ldap.vmode_full.ssl.truststore.path", truststore);
+        mockSecureSettings.setString("xpack.security.authc.realms.ldap.vmode_full.ssl.truststore.secure_password", "changeit");
         builder.put("xpack.security.authc.realms.ldap.vmode_full.ssl.verification_mode", VerificationMode.FULL);
-
         globalSettings = builder.setSecureSettings(mockSecureSettings).build();
         Environment environment = TestEnvironment.newEnvironment(globalSettings);
         sslService = new SSLService(globalSettings, environment);
@@ -290,11 +276,8 @@ public class OpenLdapTests extends ESTestCase {
         final String[] urls = {ldapUrl};
         final String[] templates = {userTemplate};
         Settings.Builder builder = Settings.builder()
-                .put(LdapTestCase.buildLdapSettings(realmId, urls, templates, groupSearchBase, scope, null, false));
+            .put(LdapTestCase.buildLdapSettings(realmId, urls, templates, groupSearchBase, scope, null, false));
         builder.put(getFullSettingKey(realmId.getName(), SearchGroupsResolverSettings.USER_ATTRIBUTE), "uid");
-        if (useGlobalSSL) {
-            return builder.build();
-        }
         return builder
             .put(getFullSettingKey(realmId, SSLConfigurationSettings.TRUST_STORE_PATH_REALM), getDataPath(LDAPTRUST_PATH))
             .put(getFullSettingKey(realmId, SSLConfigurationSettings.LEGACY_TRUST_STORE_PASSWORD_REALM), "changeit")
@@ -323,5 +306,12 @@ public class OpenLdapTests extends ESTestCase {
         final PlainActionFuture<Map<String, Object>> future = new PlainActionFuture<>();
         resolver.resolve(connection, HAWKEYE_DN, TimeValue.timeValueSeconds(1), logger, null, future);
         return future.get();
+    }
+
+    private static String getFromProperty(String port) {
+        String key = "test.fixtures.openldap.tcp." + port;
+        final String value = System.getProperty(key);
+        assertNotNull("Expected the actual value for port " + port + " to be in system property " + key, value);
+        return value;
     }
 }

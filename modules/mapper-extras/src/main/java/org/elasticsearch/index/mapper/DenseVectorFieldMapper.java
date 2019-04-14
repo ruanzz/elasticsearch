@@ -31,9 +31,9 @@ import org.elasticsearch.common.xcontent.XContentParser.Token;
 import org.elasticsearch.index.fielddata.IndexFieldData;
 import org.elasticsearch.index.query.QueryShardContext;
 import org.elasticsearch.search.DocValueFormat;
-import org.joda.time.DateTimeZone;
 
 import java.io.IOException;
+import java.time.ZoneId;
 import java.util.List;
 import java.util.Map;
 
@@ -107,7 +107,7 @@ public class DenseVectorFieldMapper extends FieldMapper implements ArrayValueMap
         }
 
         @Override
-        public DocValueFormat docValueFormat(String format, DateTimeZone timeZone) {
+        public DocValueFormat docValueFormat(String format, ZoneId timeZone) {
             throw new UnsupportedOperationException(
                 "Field [" + name() + "] of type [" + typeName() + "] doesn't support docvalue_fields or aggregations");
         }
@@ -169,10 +169,9 @@ public class DenseVectorFieldMapper extends FieldMapper implements ArrayValueMap
             buf[offset+2] = (byte) (intValue >>  8);
             buf[offset+3] = (byte) intValue;
             offset += INT_BYTES;
-            dim++;
-            if (dim >= MAX_DIMS_COUNT) {
+            if (dim++ >= MAX_DIMS_COUNT) {
                 throw new IllegalArgumentException("Field [" + name() + "] of type [" + typeName() +
-                    "] has exceeded the maximum allowed number of dimensions of :[" + MAX_DIMS_COUNT + "]");
+                    "] has exceeded the maximum allowed number of dimensions of [" + MAX_DIMS_COUNT + "]");
             }
         }
         BinaryDocValuesField field = new BinaryDocValuesField(fieldType().name(), new BytesRef(buf, 0, offset));

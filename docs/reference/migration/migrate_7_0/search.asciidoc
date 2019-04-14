@@ -2,6 +2,38 @@
 [[breaking_70_search_changes]]
 === Search and Query DSL changes
 
+//NOTE: The notable-breaking-changes tagged regions are re-used in the
+//Installation and Upgrade Guide
+
+//tag::notable-breaking-changes[]
+
+// end::notable-breaking-changes[]
+
+[float]
+==== Off-heap terms index
+
+The terms dictionary is the part of the inverted index that records all terms
+that occur within a segment in sorted order. In order to provide fast retrieval,
+terms dictionaries come with a small terms index that allows for efficient
+random access by term. Until now this terms index had always been loaded
+on-heap.
+
+As of 7.0, the terms index is loaded on-heap for fields that only have unique
+values such as `_id` fields, and off-heap otherwise - likely most other fields.
+This is expected to reduce memory requirements but might slow down search
+requests if both below conditions are met:
+
+* The size of the data directory on each node is significantly larger than the
+  amount of memory that is available to the filesystem cache.
+
+* The number of matches of the query is not several orders of magnitude greater
+  than the number of terms that the query tries to match, either explicitly via
+  `term` or `terms` queries, or implicitly via multi-term queries such as
+  `prefix`, `wildcard` or `fuzzy` queries.
+
+This change affects both existing indices created with Elasticsearch 6.x and new
+indices created with Elasticsearch 7.x.
+
 [float]
 ==== Changes to queries
 *   The default value for `transpositions` parameter of `fuzzy` query
@@ -123,6 +155,16 @@ Search requests with extra content after the main object will no longer be accep
 by the `_search` endpoint. A parsing exception will be thrown instead.
 
 [float]
+==== Doc-value fields default format
+
+The format of doc-value fields is changing to be the same as what could be
+obtained in 6.x with the special `use_field_mapping` format. This is mostly a
+change for date fields, which are now formatted based on the format that is
+configured in the mappings by default. This behavior can be changed by
+specifying a <<search-request-docvalue-fields,`format`>> within the doc-value
+field.
+
+[float]
 ==== Context Completion Suggester
 
 The ability to query and index context enabled suggestions without context,
@@ -149,8 +191,8 @@ instead which is a more appropriate value for a scenario where scores are not av
 [float]
 ==== Negative boosts are not allowed
 
-Setting a negative `boost` in a query, deprecated in 6x, are not allowed in this version.
-To deboost a specific query you can use a `boost` comprise between 0 and 1.
+Setting a negative `boost` for a query or a field, deprecated in 6x, is not allowed in this version.
+To deboost a specific query or field you can use a `boost` comprise between 0 and 1.
 
 [float]
 ==== Negative scores are not allowed in Function Score Query
@@ -170,6 +212,7 @@ on whether queries need to access score or not. As a result `bool` queries with
 `minimum_should_match` to 1. This behavior has been deprecated in the previous
 major version.
 
+//tag::notable-breaking-changes[]
 [float]
 ==== `hits.total` is now an object in the search response
 
@@ -178,25 +221,28 @@ with a `value` and a `relation`. `value` indicates the number of hits that
 match and `relation` indicates whether the value is accurate (`eq`) or a lower bound
 (`gte`):
 
-```
+[source,js]
+--------------------------------------------------
 {
     "hits": {
-        "total": {   <1>
+        "total": {
             "value": 1000,
             "relation": "eq"
         },
         ...
     }
 }
-```
+--------------------------------------------------
+// NOTCONSOLE
 
-The "total" object in the response indicates that the query matches exactly 1000
+The `total` object in the response indicates that the query matches exactly 1000
 documents ("eq"). The `value` is always accurate (`"relation": "eq"`) when
 `track_total_hits` is set to true in the request.
 You can also retrieve `hits.total` as a number in the rest response by adding
 `rest_total_hits_as_int=true` in the request parameter of the search request.
 This parameter has been added to ease the transition to the new format and
 will be removed in the next major version (8.0).
+//end::notable-breaking-changes[]
 
 [float]
 ==== `hits.total` is omitted in the response if `track_total_hits` is disabled (false)
@@ -205,3 +251,54 @@ If `track_total_hits` is set to `false` in the search request the search respons
 will set `hits.total` to null and the object will not be displayed in the rest
 layer. You can add `rest_total_hits_as_int=true` in the search request parameters
 to get the old format back (`"total": -1`).
+
+//tag::notable-breaking-changes[]
+[float]
+==== `track_total_hits` defaults to 10,000
+
+By default search request will count the total hits accurately up to `10,000`
+documents. If the total number of hits that match the query is greater than this
+ value, the response will indicate that the returned value is a lower bound:
+
+[source,js]
+--------------------------------------------------
+{
+     "_shards": ...
+     "timed_out": false,
+     "took": 100,
+     "hits": {
+         "max_score": 1.0,
+         "total" : {
+             "value": 10000,    <1>
+             "relation": "gte"  <2>
+         },
+         "hits": ...
+     }
+}
+--------------------------------------------------
+// NOTCONSOLE
+
+<1> There are at least 10000 documents that match the query
+<2> This is a lower bound (`"gte"`).
+
+You can force the count to always be accurate by setting `"track_total_hits`
+to true explicitly in the search request.
+//end::notable-breaking-changes[]
+
+[float]
+==== Limitations on Similarities
+Lucene 8 introduced more constraints on similarities, in particular:
+
+- scores must not be negative,
+- scores must not decrease when term freq increases,
+- scores must not increase when norm (interpreted as an unsigned long) increases.
+
+[float]
+==== Weights in Function Score must be positive
+Negative `weight` parameters in the `function_score` are no longer allowed.
+
+[float]
+==== Query string and Simple query string limit expansion of fields to 1024
+The number of automatically expanded fields for the "all fields"
+mode (`"default_field": "*"`) for the query_string and simple_query_string
+queries is now 1024 fields.

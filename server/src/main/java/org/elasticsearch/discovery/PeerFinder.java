@@ -69,7 +69,7 @@ import static org.elasticsearch.cluster.coordination.DiscoveryUpgradeService.cre
 
 public abstract class PeerFinder {
 
-    protected final Logger logger = LogManager.getLogger(getClass());
+    private static final Logger logger = LogManager.getLogger(PeerFinder.class);
 
     public static final String REQUEST_PEERS_ACTION_NAME = "internal:discovery/request_peers";
 
@@ -308,7 +308,7 @@ public abstract class PeerFinder {
         return peersRemoved;
     }
 
-    private void startProbe(TransportAddress transportAddress) {
+    protected void startProbe(TransportAddress transportAddress) {
         assert holdsLock() : "PeerFinder mutex not held";
         if (active == false) {
             logger.trace("startProbe({}) not running", transportAddress);

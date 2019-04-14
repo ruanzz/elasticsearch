@@ -178,6 +178,7 @@ public class QueryBuilderBWCIT extends AbstractFullClusterRestartTestCase {
             }
             mappingsAndSettings.endObject();
             Request request = new Request("PUT", "/" + index);
+            request.setOptions(allowTypesRemovalWarnings());
             request.setJsonEntity(Strings.toString(mappingsAndSettings));
             Response rsp = client().performRequest(request);
             assertEquals(200, rsp.getStatusLine().getStatusCode());
@@ -196,7 +197,7 @@ public class QueryBuilderBWCIT extends AbstractFullClusterRestartTestCase {
                 QueryBuilder expectedQueryBuilder = (QueryBuilder) CANDIDATES.get(i)[1];
                 Request request = new Request("GET", "/" + index + "/_search");
                 request.setJsonEntity("{\"query\": {\"ids\": {\"values\": [\"" + Integer.toString(i) + "\"]}}, " +
-                        "\"docvalue_fields\": [{\"field\":\"query.query_builder_field\", \"format\":\"use_field_mapping\"}]}");
+                        "\"docvalue_fields\": [{\"field\":\"query.query_builder_field\"}]}");
                 Response rsp = client().performRequest(request);
                 assertEquals(200, rsp.getStatusLine().getStatusCode());
                 Map<?, ?> hitRsp = (Map<?, ?>) ((List<?>) ((Map<?, ?>)toMap(rsp).get("hits")).get("hits")).get(0);

@@ -1,5 +1,5 @@
 [[modules-snapshots]]
-== Snapshot And Restore
+== Snapshot and Restore
 
 A snapshot is a backup taken from a running Elasticsearch cluster. You can take
 a snapshot of individual indices or of the entire cluster and store it in a
@@ -28,25 +28,25 @@ back up a cluster is by using the snapshot and restore functionality.
 [float]
 === Version compatibility
 
-A snapshot contains a copy of the on-disk data structures that make up an
-index. This means that snapshots can only be restored to versions of
-Elasticsearch that can read the indices:
+To restore a snapshot of an index, the index must be compatible with the {es}
+version you are restoring to. {es} can read indices created in the current or
+previous major version. Compatibility is based on the version in which the index
+was _created_, not the version from which the snapshot was taken.
 
-* A snapshot of an index created in 5.x can be restored to 6.x.
-* A snapshot of an index created in 2.x can be restored to 5.x.
-* A snapshot of an index created in 1.x can be restored to 2.x.
+You can restore snapshots of indices created in {prev-major-version} to {es}
+{version}. Snapshots of 5.x or earlier indices cannot be restored to {es}
+{version}.
 
-Conversely, snapshots of indices created in 1.x **cannot** be restored to 5.x
-or 6.x, and snapshots of indices created in 2.x **cannot** be restored to 6.x.
+[IMPORTANT]
+====
+Snapshots can contain indices created in more than one version of {es}.
+If you attempt to restore a snapshot with incompatible indices, the restore
+will fail.
 
-Each snapshot can contain indices created in various versions of Elasticsearch,
-and when restoring a snapshot it must be possible to restore all of the indices
-into the target cluster. If any indices in a snapshot were created in an
-incompatible version, you will not be able restore the snapshot.
-
-IMPORTANT: When backing up your data prior to an upgrade, keep in mind that you
-won't be able to restore snapshots after you upgrade if they contain indices
-created in a version that's incompatible with the upgrade version.
+When backing up your data prior to an upgrade, keep in mind that to restore the
+snapshot to the upgraded cluster, all indices in the snapshot must be compatible
+with the upgrade version.
+====
 
 If you end up in a situation where you need to restore a snapshot of an index
 that is incompatible with the version of the cluster you are currently running,
@@ -112,7 +112,7 @@ which returns:
 -----------------------------------
 // TESTRESPONSE
 
-To retrieve information about multiple repositories, specify a comma-delimited 
+To retrieve information about multiple repositories, specify a comma-delimited
 list of repositories. You can also use the * wildcard when
 specifying repository names. For example, the following request retrieves
 information about all of the snapshot repositories that start with `repo` or
@@ -203,7 +203,7 @@ The following settings are supported:
 
 [horizontal]
 `location`:: Location of the snapshots. Mandatory.
-`compress`:: Turns on compression of the snapshot files. Compression is applied only to metadata files (index mapping and settings). Data files are not compressed. Defaults to `true`.
+`compress`:: Turns on compression of the snapshot files. Compression is applied only to metadata files (index mapping and settings). Data files are not compressed. Defaults to `false`.
 `chunk_size`:: Big files can be broken down into chunks during snapshotting if needed. The chunk size can be specified in bytes or by
  using size value notation, i.e. 1g, 10m, 5k. Defaults to `null` (unlimited chunk size).
 `max_restore_bytes_per_sec`:: Throttles per node restore rate. Defaults to `40mb` per second.

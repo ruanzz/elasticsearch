@@ -30,6 +30,7 @@ import org.elasticsearch.cluster.ClusterStateTaskExecutor;
 import org.elasticsearch.cluster.ESAllocationTestCase;
 import org.elasticsearch.cluster.coordination.JoinTaskExecutor;
 import org.elasticsearch.cluster.coordination.NodeRemovalClusterStateTaskExecutor;
+import org.elasticsearch.cluster.coordination.ValidateJoinRequest;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MetaData;
 import org.elasticsearch.cluster.node.DiscoveryNode;
@@ -268,6 +269,9 @@ public class ZenDiscoveryUnitTests extends ESTestCase {
             IOUtils.close(toClose);
             terminate(threadPool);
         }
+
+        assertWarnings("[discovery.zen.minimum_master_nodes] setting was deprecated in Elasticsearch and will be removed in a future " +
+            "release! See the breaking changes documentation for the next major version.");
     }
 
     public void testPendingCSQueueIsClearedWhenClusterStatePublished() throws Exception {
@@ -318,6 +322,9 @@ public class ZenDiscoveryUnitTests extends ESTestCase {
             IOUtils.close(toClose);
             terminate(threadPool);
         }
+
+        assertWarnings("[discovery.zen.minimum_master_nodes] setting was deprecated in Elasticsearch and will be removed in a future " +
+            "release! See the breaking changes documentation for the next major version.");
     }
 
     private class AwaitingPublishListener implements ActionListener<Void> {
@@ -415,13 +422,13 @@ public class ZenDiscoveryUnitTests extends ESTestCase {
                 .routingTable(RoutingTable.builder().add(indexRoutingTable).build());
             if (incompatible) {
                 IllegalStateException ex = expectThrows(IllegalStateException.class, () ->
-                    request.messageReceived(new MembershipAction.ValidateJoinRequest(stateBuilder.build()), null, null));
+                    request.messageReceived(new ValidateJoinRequest(stateBuilder.build()), null, null));
                 assertEquals("index [test] version not supported: "
                     + VersionUtils.getPreviousVersion(Version.CURRENT.minimumIndexCompatibilityVersion())
                     + " minimum compatible index version is: " + Version.CURRENT.minimumIndexCompatibilityVersion(), ex.getMessage());
             } else {
                 AtomicBoolean sendResponse = new AtomicBoolean(false);
-                request.messageReceived(new MembershipAction.ValidateJoinRequest(stateBuilder.build()), new TransportChannel() {
+                request.messageReceived(new ValidateJoinRequest(stateBuilder.build()), new TransportChannel() {
 
                     @Override
                     public String getProfileName() {

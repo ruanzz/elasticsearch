@@ -7,20 +7,19 @@ package org.elasticsearch.xpack.deprecation;
 
 
 import com.carrotsearch.hppc.cursors.ObjectCursor;
-
 import org.elasticsearch.Version;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.MappingMetaData;
-import org.elasticsearch.common.settings.Settings;
-import org.elasticsearch.index.analysis.AnalysisRegistry;
-import org.elasticsearch.index.mapper.DynamicTemplate;
+import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.xpack.core.deprecation.DeprecationIssue;
 
 import java.util.ArrayList;
-import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.BiConsumer;
 import java.util.function.Function;
 
@@ -46,7 +45,7 @@ public class IndexDeprecationChecks {
      * @return a list of issues found in fields
      */
     @SuppressWarnings("unchecked")
-    private static List<String> findInPropertiesRecursively(String type, Map<String, Object> parentMap,
+    static List<String> findInPropertiesRecursively(String type, Map<String, Object> parentMap,
                                                     Function<Map<?,?>, Boolean> predicate) {
         List<String> issues = new ArrayList<>();
         Map<?, ?> properties = (Map<?, ?>) parentMap.get("properties");
@@ -79,119 +78,88 @@ public class IndexDeprecationChecks {
         return issues;
     }
 
-    static DeprecationIssue dynamicTemplateWithMatchMappingTypeCheck(IndexMetaData indexMetaData) {
-        if (indexMetaData.getCreationVersion().before(Version.V_6_0_0_alpha1)) {
-            List<String> issues = new ArrayList<>();
-            fieldLevelMappingIssue(indexMetaData, (mappingMetaData, sourceAsMap) -> {
-                List<?> dynamicTemplates = (List<?>) mappingMetaData
-                    .getSourceAsMap().getOrDefault("dynamic_templates", Collections.emptyList());
-                for (Object template : dynamicTemplates) {
-                    for (Map.Entry<?, ?> prop : ((Map<?, ?>) template).entrySet()) {
-                        Map<?, ?> val = (Map<?, ?>) prop.getValue();
-                        if (val.containsKey("match_mapping_type")) {
-                            Object mappingMatchType = val.get("match_mapping_type");
-                            boolean isValidMatchType = Arrays.stream(DynamicTemplate.XContentFieldType.values())
-                                .anyMatch(v -> v.toString().equals(mappingMatchType));
-                            if (isValidMatchType == false) {
-                                issues.add("type: " + mappingMetaData.type() + ", dynamicFieldDefinition"
-                                    + prop.getKey() + ", unknown match_mapping_type[" + mappingMatchType + "]");
-                            }
-                        }
+    static DeprecationIssue oldIndicesCheck(IndexMetaData indexMetaData) {
+        Version createdWith = indexMetaData.getCreationVersion();
+        if (createdWith.before(Version.V_7_0_0)) {
+                return new DeprecationIssue(DeprecationIssue.Level.CRITICAL,
+                    "Index created before 7.0",
+                    "https://www.elastic.co/guide/en/elasticsearch/reference/master/" +
+                        "breaking-changes-8.0.html",
+                    "This index was created using version: " + createdWith);
+            }
+        return null;
+    }
+
+    static DeprecationIssue tooManyFieldsCheck(IndexMetaData indexMetaData) {
+        if (indexMetaData.getSettings().get(IndexSettings.DEFAULT_FIELD_SETTING.getKey()) == null) {
+            AtomicInteger fieldCount = new AtomicInteger(0);
+
+            fieldLevelMappingIssue(indexMetaData, ((mappingMetaData, sourceAsMap) -> {
+                fieldCount.addAndGet(countFieldsRecursively(mappingMetaData.type(), sourceAsMap));
+            }));
+
+            // We can't get to the setting `indices.query.bool.max_clause_count` from here, so just check the default of that setting.
+            // It's also much better practice to set `index.query.default_field` than `indices.query.bool.max_clause_count` - there's a
+            // reason we introduced the limit.
+            if (fieldCount.get() > 1024) {
+                return new DeprecationIssue(DeprecationIssue.Level.WARNING,
+                    "Number of fields exceeds automatic field expansion limit",
+                    "https://www.elastic.co/guide/en/elasticsearch/reference/7.0/breaking-changes-7.0.html" +
+                        "#_limiting_the_number_of_auto_expanded_fields",
+                    "This index has [" + fieldCount.get() + "] fields, which exceeds the automatic field expansion limit of 1024 " +
+                        "and does not have [" + IndexSettings.DEFAULT_FIELD_SETTING.getKey() + "] set, which may cause queries which use " +
+                        "automatic field expansion, such as query_string, simple_query_string, and multi_match to fail if fields are not " +
+                        "explicitly specified in the query.");
+            }
+        }
+        return null;
+    }
+
+
+    private static final Set<String> TYPES_THAT_DONT_COUNT;
+    static {
+        HashSet<String> typesThatDontCount = new HashSet<>();
+        typesThatDontCount.add("binary");
+        typesThatDontCount.add("geo_point");
+        typesThatDontCount.add("geo_shape");
+        TYPES_THAT_DONT_COUNT = Collections.unmodifiableSet(typesThatDontCount);
+    }
+    /* Counts the number of fields in a mapping, designed to count the as closely as possible to
+     * org.elasticsearch.index.search.QueryParserHelper#checkForTooManyFields
+     */
+    @SuppressWarnings("unchecked")
+    static int countFieldsRecursively(String type, Map<String, Object> parentMap) {
+        int fields = 0;
+        Map<?, ?> properties = (Map<?, ?>) parentMap.get("properties");
+        if (properties == null) {
+            return fields;
+        }
+        for (Map.Entry<?, ?> entry : properties.entrySet()) {
+            Map<String, Object> valueMap = (Map<String, Object>) entry.getValue();
+            if (valueMap.containsKey("type")
+                && (valueMap.get("type").equals("object") && valueMap.containsKey("properties") == false) == false
+                && (TYPES_THAT_DONT_COUNT.contains(valueMap.get("type")) == false)) {
+                fields++;
+            }
+
+            Map<?, ?> values = (Map<?, ?>) valueMap.get("fields");
+            if (values != null) {
+                for (Map.Entry<?, ?> multifieldEntry : values.entrySet()) {
+                    Map<String, Object> multifieldValueMap = (Map<String, Object>) multifieldEntry.getValue();
+                    if (multifieldValueMap.containsKey("type")
+                        && (TYPES_THAT_DONT_COUNT.contains(valueMap.get("type")) == false)) {
+                        fields++;
+                    }
+                    if (multifieldValueMap.containsKey("properties")) {
+                        fields += countFieldsRecursively(type, multifieldValueMap);
                     }
                 }
-            });
-            if (issues.size() > 0) {
-                return new DeprecationIssue(DeprecationIssue.Level.CRITICAL,
-                    "Unrecognized match_mapping_type options not silently ignored",
-                    "https://www.elastic.co/guide/en/elasticsearch/reference/master/" +
-                        "breaking_60_mappings_changes.html" +
-                        "#_unrecognized_literal_match_mapping_type_literal_options_not_silently_ignored",
-                    issues.toString());
+            }
+            if (valueMap.containsKey("properties")) {
+                fields += countFieldsRecursively(type, valueMap);
             }
         }
-        return null;
-    }
 
-    static DeprecationIssue baseSimilarityDefinedCheck(IndexMetaData indexMetaData) {
-        if (indexMetaData.getCreationVersion().before(Version.V_6_0_0_alpha1)) {
-            Settings settings = indexMetaData.getSettings().getAsSettings("index.similarity.base");
-            if (settings.size() > 0) {
-                return new DeprecationIssue(DeprecationIssue.Level.WARNING,
-                    "The base similarity is now ignored as coords and query normalization have been removed." +
-                        "If provided, this setting will be ignored and issue a deprecation warning",
-                    "https://www.elastic.co/guide/en/elasticsearch/reference/master/" +
-                        "breaking_60_settings_changes.html#_similarity_settings", null);
-
-            }
-        }
-        return null;
-    }
-
-    static DeprecationIssue delimitedPayloadFilterCheck(IndexMetaData indexMetaData) {
-        if (indexMetaData.getCreationVersion().before(Version.V_7_0_0)) {
-            List<String> issues = new ArrayList<>();
-                Map<String, Settings> filters = indexMetaData.getSettings().getGroups(AnalysisRegistry.INDEX_ANALYSIS_FILTER);
-                for (Map.Entry<String, Settings> entry : filters.entrySet()) {
-                if ("delimited_payload_filter".equals(entry.getValue().get("type"))) {
-                    issues.add("The filter [" + entry.getKey() + "] is of deprecated 'delimited_payload_filter' type. "
-                            + "The filter type should be changed to 'delimited_payload'.");
-                }
-                }
-            if (issues.size() > 0) {
-                return new DeprecationIssue(DeprecationIssue.Level.WARNING,
-                        "Use of 'delimited_payload_filter'.",
-                        "https://www.elastic.co/guide/en/elasticsearch/reference/master/breaking_70_analysis_changes.html",
-                        issues.toString());
-            }
-        }
-        return null;
-    }
-
-    static DeprecationIssue indexStoreTypeCheck(IndexMetaData indexMetaData) {
-        if (indexMetaData.getCreationVersion().before(Version.V_6_0_0_alpha1) &&
-            indexMetaData.getSettings().get("index.store.type") != null) {
-            return new DeprecationIssue(DeprecationIssue.Level.CRITICAL,
-                "The default index.store.type has been removed. If you were using it, " +
-                    "we advise that you simply remove it from your index settings and Elasticsearch" +
-                    "will use the best store implementation for your operating system.",
-                "https://www.elastic.co/guide/en/elasticsearch/reference/master/" +
-                    "breaking_60_settings_changes.html#_store_settings", null);
-
-        }
-        return null;
-    }
-
-    static DeprecationIssue storeThrottleSettingsCheck(IndexMetaData indexMetaData) {
-        if (indexMetaData.getCreationVersion().before(Version.V_6_0_0_alpha1)) {
-            Settings settings = indexMetaData.getSettings();
-            Settings throttleSettings = settings.getAsSettings("index.store.throttle");
-            ArrayList<String> foundSettings = new ArrayList<>();
-            if (throttleSettings.get("max_bytes_per_sec") != null) {
-                foundSettings.add("index.store.throttle.max_bytes_per_sec");
-            }
-            if (throttleSettings.get("type") != null) {
-                foundSettings.add("index.store.throttle.type");
-            }
-
-            if (foundSettings.isEmpty() == false) {
-                return new DeprecationIssue(DeprecationIssue.Level.CRITICAL,
-                    "index.store.throttle settings are no longer recognized. these settings should be removed",
-                    "https://www.elastic.co/guide/en/elasticsearch/reference/master/" +
-                        "breaking_60_settings_changes.html#_store_throttling_settings", "present settings: " + foundSettings);
-            }
-        }
-        return null;
-    }
-
-    static DeprecationIssue indexSharedFileSystemCheck(IndexMetaData indexMetaData) {
-        if (indexMetaData.getCreationVersion().before(Version.V_6_0_0_alpha1) &&
-            indexMetaData.getSettings().get("index.shared_filesystem") != null) {
-            return new DeprecationIssue(DeprecationIssue.Level.CRITICAL,
-                "[index.shared_filesystem] setting should be removed",
-                "https://www.elastic.co/guide/en/elasticsearch/reference/6.0/" +
-                    "breaking_60_indices_changes.html#_shadow_replicas_have_been_removed", null);
-
-        }
-        return null;
+        return fields;
     }
 }

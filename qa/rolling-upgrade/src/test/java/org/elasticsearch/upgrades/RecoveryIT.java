@@ -18,6 +18,7 @@
  */
 package org.elasticsearch.upgrades;
 
+import org.apache.http.util.EntityUtils;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.support.PlainActionFuture;
 import org.elasticsearch.client.Request;
@@ -26,6 +27,7 @@ import org.elasticsearch.client.ResponseException;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.util.concurrent.AbstractRunnable;
+import org.elasticsearch.common.xcontent.support.XContentMapValues;
 import org.elasticsearch.index.IndexSettings;
 import org.elasticsearch.rest.action.document.RestIndexAction;
 import org.elasticsearch.test.rest.yaml.ObjectPath;
@@ -35,6 +37,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 
 import static com.carrotsearch.randomizedtesting.RandomizedTest.randomAsciiOfLength;
@@ -43,6 +46,7 @@ import static org.elasticsearch.cluster.routing.allocation.decider.EnableAllocat
 import static org.elasticsearch.cluster.routing.allocation.decider.MaxRetryAllocationDecider.SETTING_ALLOCATION_MAX_RETRY;
 import static org.hamcrest.Matchers.equalTo;
 import static org.hamcrest.Matchers.hasSize;
+import static org.hamcrest.Matchers.isIn;
 import static org.hamcrest.Matchers.notNullValue;
 
 /**
@@ -50,7 +54,6 @@ import static org.hamcrest.Matchers.notNullValue;
  */
 public class RecoveryIT extends AbstractRollingTestCase {
 
-    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/31291")
     public void testHistoryUUIDIsGenerated() throws Exception {
         final String index = "index_history_uuid";
         if (CLUSTER_TYPE == ClusterType.OLD) {
@@ -164,13 +167,26 @@ public class RecoveryIT extends AbstractRollingTestCase {
     }
 
     private void assertCount(final String index, final String preference, final int expectedCount) throws IOException {
-        final Request request = new Request("GET", index + "/_count");
-        request.addParameter("preference", preference);
-        final Response response = client().performRequest(request);
-        final int actualCount = Integer.parseInt(ObjectPath.createFromResponse(response).evaluate("count").toString());
-        assertThat("preference [" + preference + "]", actualCount, equalTo(expectedCount));
+        final int actualDocs;
+        try {
+            final Request request = new Request("GET", index + "/_count");
+            if (preference != null) {
+                request.addParameter("preference", preference);
+            }
+            final Response response = client().performRequest(request);
+            actualDocs = Integer.parseInt(ObjectPath.createFromResponse(response).evaluate("count").toString());
+        } catch (ResponseException e) {
+            try {
+                final Response recoveryStateResponse = client().performRequest(new Request("GET", index + "/_recovery"));
+                fail("failed to get doc count for index [" + index + "] with preference [" + preference + "]" + " response [" + e + "]"
+                    + " recovery [" + EntityUtils.toString(recoveryStateResponse.getEntity()) + "]");
+            } catch (Exception inner) {
+                e.addSuppressed(inner);
+            }
+            throw e;
+        }
+        assertThat("preference [" + preference + "]", actualDocs, equalTo(expectedCount));
     }
-
 
     private String getNodeId(Predicate<Version> versionPredicate) throws IOException {
         Response response = client().performRequest(new Request("GET", "_nodes"));
@@ -185,7 +201,6 @@ public class RecoveryIT extends AbstractRollingTestCase {
         return null;
     }
 
-    @AwaitsFix(bugUrl = "https://github.com/elastic/elasticsearch/issues/34950")
     public void testRelocationWithConcurrentIndexing() throws Exception {
         final String index = "relocation_with_concurrent_indexing";
         switch (CLUSTER_TYPE) {
@@ -219,6 +234,15 @@ public class RecoveryIT extends AbstractRollingTestCase {
                 ensureNoInitializingShards(); // wait for all other shard activity to finish
                 updateIndexSettings(index, Settings.builder().put("index.routing.allocation.include._id", newNode));
                 asyncIndexDocs(index, 10, 50).get();
+                // ensure the relocation from old node to new node has occurred; otherwise ensureGreen can
+                // return true even though shards haven't moved to the new node yet (allocation was throttled).
+                assertBusy(() -> {
+                    Map<String, ?> state = entityAsMap(client().performRequest(new Request("GET", "/_cluster/state")));
+                    String xpath = "routing_table.indices." + index + ".shards.0.node";
+                    @SuppressWarnings("unchecked") List<String> assignedNodes = (List<String>) XContentMapValues.extractValue(xpath, state);
+                    assertNotNull(state.toString(), assignedNodes);
+                    assertThat(state.toString(), newNode, isIn(assignedNodes));
+                }, 60, TimeUnit.SECONDS);
                 ensureGreen(index);
                 client().performRequest(new Request("POST", index + "/_refresh"));
                 assertCount(index, "_only_nodes:" + newNode, 60);

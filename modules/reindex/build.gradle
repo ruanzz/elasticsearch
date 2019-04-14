@@ -45,7 +45,7 @@ run {
   setting 'reindex.remote.whitelist', '127.0.0.1:*'
 }
 
-unitTest {
+test {
   /*
    * We have to disable setting the number of available processors as tests in the
    * same JVM randomize processors and will step on each other if we allow them to
@@ -56,6 +56,7 @@ unitTest {
 
 dependencies {
   compile "org.elasticsearch.client:elasticsearch-rest-client:${version}"
+  compile "org.elasticsearch:elasticsearch-ssl-config:${version}"
   // for http - testing reindex from remote
   testCompile project(path: ':modules:transport-netty4', configuration: 'runtime')
   // for parent/child testing
@@ -70,6 +71,11 @@ thirdPartyAudit.ignoreMissingClasses (
   'org.apache.log.Hierarchy',
   'org.apache.log.Logger',
 )
+
+forbiddenPatterns {
+    // PKCS#12 file are not UTF-8
+    exclude '**/*.p12'
+}
 
 // Support for testing reindex-from-remote against old Elaticsearch versions
 configurations {
@@ -132,7 +138,7 @@ if (Os.isFamily(Os.FAMILY_WINDOWS)) {
       /* Use a closure on the string to delay evaluation until right before we
        * run the integration tests so that we can be sure that the file is
        * ready. */
-      systemProperty "es${version}.port", "${ -> fixture.addressAndPort }"
+        nonInputProperties.systemProperty "es${version}.port", "${ -> fixture.addressAndPort }"
     }
   }
 }

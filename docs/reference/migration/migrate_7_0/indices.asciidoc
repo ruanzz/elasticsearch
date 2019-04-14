@@ -2,10 +2,16 @@
 [[breaking_70_indices_changes]]
 === Indices changes
 
+//NOTE: The notable-breaking-changes tagged regions are re-used in the
+//Installation and Upgrade Guide
+
+//tag::notable-breaking-changes[]
+
 [float]
 ==== Index creation no longer defaults to five shards
 Previous versions of Elasticsearch defaulted to creating five shards per index.
 Starting with 7.0.0, the default is now one shard per index.
+//end::notable-breaking-changes[]
 
 [float]
 ==== `:` is no longer allowed in index name
@@ -38,7 +44,7 @@ exceeded a error is thrown only for new indices. For existing pre-7.0 indices, a
 warning is logged.
 
 [float]
-==== Limit to the difference between max_size and min_size in ShingleTokenFilter
+==== Limit to the difference between max_shingle_size and min_shingle_size in ShingleTokenFilter
 
 To safeguard against creating too many tokens, the difference between `max_shingle_size` and
 `min_shingle_size` in `ShingleTokenFilter` has been limited to 3. This default

@@ -2,6 +2,20 @@
 [[breaking_70_low_level_restclient_changes]]
 === Low-level REST client changes
 
+//NOTE: The notable-breaking-changes tagged regions are re-used in the
+//Installation and Upgrade Guide
+
+//tag::notable-breaking-changes[]
+
+// end::notable-breaking-changes[]
+
+[float]
+==== Support for `maxRetryTimeout` removed from RestClient
+
+`RestClient` and `RestClientBuilder` no longer support the `maxRetryTimeout`
+setting. The setting was removed as its counting mechanism was not accurate
+and caused issues while adding little value.
+
 [float]
 ==== Deprecated flavors of performRequest have been removed
 
@@ -15,3 +29,8 @@ backwards compatibility.
 
 We deprecated `setHosts` in 6.4.0 in favor of `setNodes` because it supports
 host metadata used by the `NodeSelector`.
+
+[float]
+==== Minimum compiler version change
+The minimum compiler version on the low-level REST client has been bumped
+to JDK 8.

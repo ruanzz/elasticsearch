@@ -55,7 +55,6 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -163,7 +162,8 @@ public class ThreadPool implements Scheduler, Closeable {
     }
 
     public static Setting<TimeValue> ESTIMATED_TIME_INTERVAL_SETTING =
-        Setting.timeSetting("thread_pool.estimated_time_interval", TimeValue.timeValueMillis(200), Setting.Property.NodeScope);
+        Setting.timeSetting("thread_pool.estimated_time_interval",
+            TimeValue.timeValueMillis(200), TimeValue.ZERO, Setting.Property.NodeScope);
 
     public ThreadPool(final Settings settings, final ExecutorBuilder<?>... customBuilders) {
         assert Node.NODE_NAME_SETTING.exists(settings);
@@ -336,27 +336,27 @@ public class ThreadPool implements Scheduler, Closeable {
      * context of the calling thread you may call <code>threadPool.getThreadContext().preserveContext</code> on the runnable before passing
      * it to this method.
      *
+     * @param command the command to run
      * @param delay delay before the task executes
      * @param executor the name of the thread pool on which to execute this task. SAME means "execute on the scheduler thread" which changes
      *        the meaning of the ScheduledFuture returned by this method. In that case the ScheduledFuture will complete only when the
      *        command completes.
-     * @param command the command to run
      * @return a ScheduledFuture who's get will return when the task is has been added to its target thread pool and throw an exception if
      *         the task is canceled before it was added to its target thread pool. Once the task has been added to its target thread pool
      *         the ScheduledFuture will cannot interact with it.
      * @throws org.elasticsearch.common.util.concurrent.EsRejectedExecutionException if the task cannot be scheduled for execution
      */
     @Override
-    public ScheduledFuture<?> schedule(TimeValue delay, String executor, Runnable command) {
+    public ScheduledCancellable schedule(Runnable command, TimeValue delay, String executor) {
         if (!Names.SAME.equals(executor)) {
             command = new ThreadedRunnable(command, executor(executor));
         }
-        return scheduler.schedule(new ThreadPool.LoggingRunnable(command), delay.millis(), TimeUnit.MILLISECONDS);
+        return new ScheduledCancellableAdapter(scheduler.schedule(command, delay.millis(), TimeUnit.MILLISECONDS));
     }
 
     public void scheduleUnlessShuttingDown(TimeValue delay, String executor, Runnable command) {
         try {
-            schedule(delay, executor, command);
+            schedule(command, delay, executor);
         } catch (EsRejectedExecutionException e) {
             if (e.isExecutorShutdown()) {
                 logger.debug(new ParameterizedMessage("could not schedule execution of [{}] after [{}] on [{}] as executor is shut down",
@@ -502,7 +502,16 @@ public class ThreadPool implements Scheduler, Closeable {
 
         @Override
         public void run() {
-            executor.execute(runnable);
+            try {
+                executor.execute(runnable);
+            } catch (EsRejectedExecutionException e) {
+                if (e.isExecutorShutdown()) {
+                    logger.debug(new ParameterizedMessage("could not schedule execution of [{}] on [{}] as executor is shut down",
+                        runnable, executor), e);
+                } else {
+                    throw e;
+                }
+            }
         }
 
         @Override
@@ -547,22 +556,36 @@ public class ThreadPool implements Scheduler, Closeable {
         /**
          * Return the current time used for relative calculations. This is
          * {@link System#nanoTime()} truncated to milliseconds.
+         * <p>
+         * If {@link ThreadPool#ESTIMATED_TIME_INTERVAL_SETTING} is set to 0
+         * then the cache is disabled and the method calls {@link System#nanoTime()}
+         * whenever called. Typically used for testing.
          */
         long relativeTimeInMillis() {
-            return relativeMillis;
+            if (0 < interval) {
+                return relativeMillis;
+            }
+            return TimeValue.nsecToMSec(System.nanoTime());
         }
 
         /**
          * Return the current epoch time, used to find absolute time. This is
          * a cached version of {@link System#currentTimeMillis()}.
+         * <p>
+         * If {@link ThreadPool#ESTIMATED_TIME_INTERVAL_SETTING} is set to 0
+         * then the cache is disabled and the method calls {@link System#currentTimeMillis()}
+         * whenever called. Typically used for testing.
          */
         long absoluteTimeInMillis() {
-            return absoluteMillis;
+            if (0 < interval) {
+                return absoluteMillis;
+            }
+            return System.currentTimeMillis();
         }
 
         @Override
         public void run() {
-            while (running) {
+            while (running && 0 < interval) {
                 relativeMillis = TimeValue.nsecToMSec(System.nanoTime());
                 absoluteMillis = System.currentTimeMillis();
                 try {
